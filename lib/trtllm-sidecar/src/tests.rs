@@ -31,6 +31,7 @@ use crate::proto as pb;
 #[derive(Clone, Default)]
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
@@ -132,9 +133,11 @@ impl pb::trtllm_service_server::TrtllmService for FakeTrtllm {
         &self,
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
+        let request_id = request.into_inner().request_id;
+        self.aborts.lock().await.push(request_id.clone());
         Ok(Response::new(pb::AbortResponse {
             success: true,
-            message: format!("aborted {}", request.into_inner().request_id),
+            message: format!("aborted {request_id}"),
         }))
     }
 
@@ -512,6 +515,21 @@ async fn cancellation_yields_a_cancelled_terminal() {
 }
 
 #[tokio::test]
+async fn abort_sends_the_abort_rpc_to_the_server() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let request_id = context.id().to_string();
+    engine.abort(context).await;
+
+    // The cancelled generation's ID must reach TensorRT-LLM, not just produce a
+    // local terminal, or the server keeps generating.
+    assert_eq!(server.service.aborts.lock().await.as_slice(), [request_id]);
+}
+
+#[tokio::test]
 async fn unsupported_features_fail_before_rpc_submission() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let engine = engine(&server.endpoint, 1);
@@ -526,7 +544,13 @@ async fn unsupported_features_fail_before_rpc_submission() {
     let mut embeds = request();
     embeds.prompt_embeds = Some("encoded".to_string());
 
-    for unsupported in [multiple, beam, embeds] {
+    let mut prompt_logprobs = request();
+    prompt_logprobs.output_options.prompt_logprobs = Some(1);
+
+    let mut visible_stops = request();
+    visible_stops.stop_conditions.stop_token_ids_visible = Some(vec![7]);
+
+    for unsupported in [multiple, beam, embeds, prompt_logprobs, visible_stops] {
         let context = dynamo_backend_common::testing::mock_context();
         let result = engine
             .generate(unsupported, GenerateContext::new(context, None))

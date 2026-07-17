@@ -67,6 +67,11 @@ impl TrtllmSidecarEngine {
         if args.model_path.trim().is_empty() {
             return Err(error::invalid_argument("model-path must not be empty"));
         }
+        if args.context_length == Some(0) {
+            return Err(error::invalid_argument(
+                "context-length must be greater than zero",
+            ));
+        }
         if args.common.disaggregation_mode != DisaggregationMode::Aggregated {
             return Err(error::invalid_argument(
                 "the TensorRT-LLM sidecar supports aggregated serving only; the Generate \

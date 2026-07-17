@@ -11,7 +11,9 @@ use futures::future::try_join_all;
 use tokio::time::Instant;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::error::{cannot_connect, invalid_argument, status_to_dynamo};
+use crate::error::{
+    cannot_connect, connection_timeout, invalid_argument, protocol_error, status_to_dynamo,
+};
 use crate::proto as pb;
 use crate::proto::trtllm_service_client::TrtllmServiceClient;
 
@@ -19,6 +21,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Deadline for the one-shot control RPCs issued at startup / on cancel, so a
+/// connected-but-unresponsive server cannot hang `start` or `abort`.
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 // TODO(sidecar-consolidation): the round-robin channel pool, the
 // `connect_until_ready` retry loop, `MAX_MESSAGE_SIZE`, and the connect/startup
@@ -82,21 +87,37 @@ impl TrtllmClient {
     /// Queries `GetModelInfo` and returns the reported maximum sequence length
     /// (input + output) as the registration context length, if positive.
     pub(crate) async fn model_info(&self) -> Result<Option<u32>, DynamoError> {
-        let info = self
-            .client()
-            .get_model_info(pb::GetModelInfoRequest {})
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("GetModelInfo", status))?;
+        let info = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.client().get_model_info(pb::GetModelInfoRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "GetModelInfo did not respond within {RPC_TIMEOUT:?}"
+            ))
+        })?
+        .map(tonic::Response::into_inner)
+        .map_err(|status| status_to_dynamo("GetModelInfo", status))?;
         Ok(u32::try_from(info.max_seq_len).ok().filter(|len| *len > 0))
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
-        self.client()
-            .abort(pb::AbortRequest { request_id })
-            .await
-            .map(|_| ())
-            .map_err(|status| status_to_dynamo("Abort", status))
+        let response = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.client().abort(pb::AbortRequest { request_id }),
+        )
+        .await
+        .map_err(|_| connection_timeout(format!("Abort did not respond within {RPC_TIMEOUT:?}")))?
+        .map(tonic::Response::into_inner)
+        .map_err(|status| status_to_dynamo("Abort", status))?;
+        if !response.success {
+            return Err(protocol_error(format!(
+                "TensorRT-LLM rejected abort: {}",
+                response.message
+            )));
+        }
+        Ok(())
     }
 }
 

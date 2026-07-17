@@ -55,7 +55,8 @@ pub(crate) fn build_generate_request(
         }),
         output_config: Some(pb::OutputConfig {
             logprobs: output.logprobs.map(logprob_count).transpose()?,
-            prompt_logprobs: output.prompt_logprobs.map(logprob_count).transpose()?,
+            // prompt_logprobs is intentionally not requested: it is rejected in
+            // `validate_request` (no `LLMEngineOutput` field to surface it).
             // TRT-LLM streams delta tokens; input tokens must not be echoed.
             exclude_input_from_output: true,
             ..Default::default()
@@ -210,6 +211,27 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "disaggregated (prefill/decode) requests are not supported by the TensorRT-LLM sidecar",
         ));
     }
+    if request.output_options.prompt_logprobs.is_some() {
+        // TRT-LLM would compute these, but the terminal `complete` carries them
+        // with no `LLMEngineOutput` field to surface — reject rather than pay for
+        // and drop them.
+        return Err(error::invalid_argument(
+            "prompt logprobs are not supported by the TensorRT-LLM sidecar",
+        ));
+    }
+    if request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+    {
+        // A visible stop token must halt generation *and* stay in the output.
+        // TRT-LLM's single `include_stop_token_in_output` flag cannot honor that
+        // per token, so reject rather than silently drop or mis-retain them.
+        return Err(error::invalid_argument(
+            "visible stop token IDs are not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     if request
         .routing
         .as_ref()
@@ -296,6 +318,9 @@ impl ResponseState {
         if prompt_tokens != 0 {
             self.prompt_tokens = prompt_tokens;
         }
+        // TRT-LLM reports cumulative (not per-chunk-delta) usage counts, verified
+        // against 1.3.0rc21 over multi-chunk streams; `max` tolerates chunks that
+        // omit the count (report 0) without regressing the running total.
         self.completion_tokens = self.completion_tokens.max(completion_tokens);
         Ok(())
     }
@@ -354,9 +379,11 @@ impl ResponseState {
         token_ids: &[u32],
         logprobs: &[pb::TokenLogprob],
     ) -> Result<MappedLogprobs, DynamoError> {
-        if !self.expect_output_logprobs || logprobs.is_empty() {
+        if !self.expect_output_logprobs {
             return Ok((None, None));
         }
+        // Logprobs were requested, so every delta token must carry one; an empty
+        // or short slice is a protocol violation, not a silent no-op.
         if logprobs.len() != token_ids.len() {
             return Err(error::protocol_error(format!(
                 "logprob count {} does not match {} delta tokens",
