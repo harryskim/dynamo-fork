@@ -77,6 +77,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
   - components/src/dynamo/trtllm/
+  - lib/trtllm-sidecar/
   - components/src/dynamo/trtllm/configs/
   - components/src/dynamo/trtllm/engines/
   - components/src/dynamo/trtllm/logits_processing/
