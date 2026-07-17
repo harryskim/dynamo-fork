@@ -85,6 +85,22 @@ so this backend truncates the rightmost 512 columns. That operation is not a
 trained projection and makes no output-quality or model-parity claim. Use this
 topology only to benchmark serving mechanics.
 
+### Native Qwen2.5-VL consumer
+
+To run the same Qwen2.5-VL vision compute as a native projected-plus-grid
+producer with a Qwen2.5-VL downstream model:
+
+```bash
+bash examples/custom_encoder/launch/agg_qwen2_5_vl_native.sh
+```
+
+`Qwen2_5VLNativeEncoder` declares
+`output_format = "qwen2_vl_projected_grid"` and returns ordered
+`Qwen2VLImageEncoding` values. The encoder does not choose the engine route. The
+resolved Qwen2.5-VL consumer makes Dynamo select `_Qwen2VLNativeAdapter`, which
+constructs the final native external-multimodal `TokensPrompt` without request
+UUIDs or correlation metadata.
+
 <Warning>
 The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
 [media URL policy](README.md#security-url-validation), finite network timeouts,
