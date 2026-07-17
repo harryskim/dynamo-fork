@@ -11,6 +11,11 @@ encoder. The encoder runs in the worker process, produces one embedding tensor
 per image, and Dynamo inserts those embeddings at the image-placeholder positions
 of a mixed prompt.
 
+At startup, Dynamo creates a `CustomEncoderAdapter` from the resolved downstream
+model configuration. The encoder owns media computation and returns tensors; the
+adapter owns validation and construction of the final vLLM `EmbedsPrompt`. Encoder
+implementations do not select their engine input route.
+
 Use this path when the language model can consume external prompt embeddings but
 the vision encoder is private, experimental, or otherwise unavailable in vLLM.
 It is not encoder disaggregation: the encoder and language model share one worker
